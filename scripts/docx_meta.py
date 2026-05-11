@@ -461,46 +461,27 @@ def main():
             #       → header="投资O32新增理财及信托产品投资功能项目-可行性分析报告"
             template_header = _read_template_header(args.document)
             if template_header:
-                # Build header from template pattern.
-                # Template: "某某系统某某功能项目-可行性分析报告"
-                #   1st '某某' = system short name
-                #   2nd '某某' = project name (before '功能')
-                #
-                # Strategy: replace only the SECOND '某某' with project name,
-                # keep the 1st as the system name derived from project name.
-                #
-                # Example:
-                #   project = "投资O32新增理财及信托产品投资功能"
-                #   → header = "投资O32系统投资O32新增理财及信托产品投资项目-可行性分析报告"
                 pname = args.project_name
-                # Extract system short name: take first meaningful segment
-                # (e.g. "投资O32" from "投资O32新增理财及信托产品投资功能")
-                sys_name = _extract_system_name(pname)
-                # Strip trailing '功能' from project name for the 2nd placeholder
-                pname_short = pname.rstrip('功能') if pname.endswith('功能') else pname
-                # Replace: 1st '某某' → system name, 2nd '某某功能' → project + '功能'
-                # Use count=1 to replace one at a time
                 header_text = template_header
-                # Find positions of '某某'
-                idx1 = header_text.find('某某')
-                if idx1 >= 0:
+                某某_count = header_text.count('某某')
+                
+                if 某某_count == 1:
+                    if pname.endswith('功能'):
+                        pname = pname[:-1]
+                    header_text = header_text.replace('某某', pname)
+                elif 某某_count >= 2:
+                    idx1 = header_text.find('某某')
                     idx2 = header_text.find('某某', idx1 + 2)
+                    
                     if idx2 >= 0:
-                        # Replace 2nd first (longer match), then 1st
-                        header_text = (
-                            header_text[:idx2]
-                            + pname_short + '功能'
-                            + header_text[idx2 + 4:]  # skip '某某功能' (4 chars)
-                        )
-                        # Recalculate 1st position (unchanged since we replaced after it)
-                        header_text = (
-                            header_text[:idx1]
-                            + sys_name
-                            + header_text[idx1 + 2:]  # skip '某某' (2 chars)
-                        )
-                    else:
-                        # Only one '某某' — replace with project name
-                        header_text = header_text.replace('某某', pname, 1)
+                        sys_name = _extract_system_name(pname)
+                        pname_short = pname[len(sys_name):] if pname.startswith(sys_name) else pname
+                        if pname_short.endswith('功能'):
+                            pname_short = pname_short[:-1]
+                        
+                        header_text = header_text[:idx1] + pname_short + header_text[idx1 + 2:]
+                        header_text = header_text[:idx2] + sys_name + header_text[idx2 + 2:]
+                
                 updates["header_text"] = header_text
             else:
                 updates["header_text"] = f"{args.project_name}项目-可行性分析报告"
