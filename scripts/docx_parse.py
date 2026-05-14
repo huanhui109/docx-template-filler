@@ -56,6 +56,102 @@ PLACEHOLDER_PATTERNS = [
 ]
 
 
+def _extract_system_name(project_name):
+    """Extract a short system name from the project name.
+
+    Examples:
+        '投资O32新增理财及信托产品投资功能' → '投资O32'
+        '交易管理系统升级项目' → '交易管理'
+        '某某系统建设' → '某某'
+
+    Strategy: take characters up to the first Chinese verb/action keyword,
+    or first 4-6 characters if no keyword found.
+    """
+    # Common action keywords that mark the boundary
+    keywords = ['新增', '升级', '改造', '建设', '优化', '扩展', '开发', '实施', '部署']
+    for kw in keywords:
+        idx = project_name.find(kw)
+        if idx > 0:
+            return project_name[:idx]
+    # Fallback: take first 4 characters
+    return project_name[:min(4, len(project_name))]
+
+
+def _find_first_title_paragraph(doc):
+    """Find the first title-like paragraph on the first page."""
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style_name = (para.style.name or '').lower()
+        if 'title' in style_name or 'heading 1' in style_name or style_name.startswith('heading'):
+            return para
+    return None
+
+
+def _read_template_header(doc):
+    """Read the current header text from a document (to extract the template pattern)."""
+    try:
+        for section in doc.sections:
+            header = section.header
+            if header.is_linked_to_previous:
+                continue
+            for para in header.paragraphs:
+                text = para.text.strip()
+                if text:
+                    return text
+    except Exception:
+        pass
+    return None
+
+
+def _replace_project_placeholder(template_text, project_name):
+    """Replace placeholder text in a template title or header using the project name."""
+    if '某某' not in template_text:
+        return template_text
+
+    count = template_text.count('某某')
+    if count == 1:
+        return template_text.replace('某某', project_name)
+
+    sys_name = _extract_system_name(project_name)
+    pname_short = project_name[len(sys_name):] if project_name.startswith(sys_name) else project_name
+    if pname_short.endswith('功能'):
+        pname_short = pname_short[:-1]
+
+    result = template_text
+    result = result.replace('某某', pname_short, 1)
+    result = result.replace('某某', sys_name, 1)
+    return result
+
+
+def _generate_title_from_project_name(doc, project_name):
+    """Generate a smart title for the document based on the project name and template."""
+    if not project_name:
+        return project_name
+
+    title_para = _find_first_title_paragraph(doc)
+    title_text = title_para.text.strip() if title_para is not None else ''
+    header_text = _read_template_header(doc)
+
+    if title_text and '某某' in title_text:
+        return _replace_project_placeholder(title_text, project_name)
+
+    if header_text and '某某' in header_text:
+        return _replace_project_placeholder(header_text, project_name)
+
+    if title_text:
+        if project_name not in title_text:
+            suffix_match = re.search(r'(项目.*|.*报告|.*方案|.*建议书)$', title_text)
+            if suffix_match:
+                return f"{project_name}{suffix_match.group(1)}"
+            if title_text in ('可行性分析报告', '项目可行性分析报告', '变更方案'):
+                return f"{project_name}{title_text}"
+        return title_text
+
+    return project_name
+
+
 def is_heading(para):
     """Check if a paragraph is a heading (by style name)."""
     style_name = (para.style.name or '').lower()
@@ -109,7 +205,7 @@ def has_table_after(doc, para_index):
     return False
 
 
-def parse_template(docx_path):
+def parse_template(docx_path, project_name=None):
     """Parse a Word template and extract its structure."""
     doc = Document(docx_path)
     sections = []
@@ -214,6 +310,11 @@ def parse_template(docx_path):
             "image_count": image_count
         }
     }
+
+    # Add suggested title if project name is provided
+    if project_name:
+        suggested_title = _generate_title_from_project_name(doc, project_name)
+        output["suggested_title"] = suggested_title
 
     return output
 
@@ -360,6 +461,7 @@ def main():
     parser.add_argument("template", help="Path to the .doc or .docx template file")
     parser.add_argument("--output", "-o", help="Output JSON file (default: stdout)")
     parser.add_argument("--flat", action="store_true", help="Output flat section list only")
+    parser.add_argument("--project-name", help="Project name for smart title generation")
 
     args = parser.parse_args()
     template_path = Path(args.template)
@@ -378,7 +480,7 @@ def main():
         result["format_lost"] = True
         result["note"] = "Original .doc formatting lost. Agent should generate new .docx from this structure."
     else:
-        result = parse_template(template_path)
+        result = parse_template(template_path, project_name=args.project_name)
 
     if args.flat:
         result = result["flat_sections"]

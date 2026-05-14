@@ -103,6 +103,14 @@ def update_meta(docx_path, output_path, updates):
                 except ValueError:
                     continue
 
+    if "project_name" in updates and updates["project_name"] and "title" not in updates:
+        updates["title"] = _generate_title_from_project_name(doc, updates["project_name"])
+
+    # Update title both in core properties and on the visible first page
+    if "title" in updates and updates["title"]:
+        props.title = updates["title"]
+        _update_document_title(doc, updates["title"])
+
     # Update headers — preserve images, right-align text
     if "header_text" in updates and updates["header_text"]:
         _update_headers_with_images(doc, updates["header_text"])
@@ -151,6 +159,92 @@ def _read_template_header(docx_path):
     except Exception:
         pass
     return None
+
+
+def _find_first_title_paragraph(doc):
+    """Find the first title-like paragraph on the first page."""
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style_name = (para.style.name or '').lower()
+        if 'title' in style_name or 'heading 1' in style_name or style_name.startswith('heading'):
+            return para
+    return None
+
+
+def _replace_project_placeholder(template_text, project_name):
+    """Replace placeholder text in a template title or header using the project name."""
+    if '某某' not in template_text:
+        return template_text
+
+    count = template_text.count('某某')
+    if count == 1:
+        return template_text.replace('某某', project_name)
+
+    sys_name = _extract_system_name(project_name)
+    pname_short = project_name[len(sys_name):] if project_name.startswith(sys_name) else project_name
+    if pname_short.endswith('功能'):
+        pname_short = pname_short[:-1]
+
+    result = template_text
+    result = result.replace('某某', pname_short, 1)
+    result = result.replace('某某', sys_name, 1)
+    return result
+
+
+def _generate_title_from_project_name(doc, project_name):
+    """Generate a smart title for the document based on the project name and template."""
+    if not project_name:
+        return project_name
+
+    title_para = _find_first_title_paragraph(doc)
+    title_text = title_para.text.strip() if title_para is not None else ''
+    header_text = None
+    try:
+        for section in doc.sections:
+            header = section.header
+            if header.is_linked_to_previous:
+                continue
+            for para in header.paragraphs:
+                text = para.text.strip()
+                if text:
+                    header_text = text
+                    break
+            if header_text:
+                break
+    except Exception:
+        header_text = None
+
+    if title_text and '某某' in title_text:
+        return _replace_project_placeholder(title_text, project_name)
+
+    if header_text and '某某' in header_text:
+        return _replace_project_placeholder(header_text, project_name)
+
+    if title_text:
+        if project_name not in title_text:
+            suffix_match = re.search(r'(项目.*|.*报告|.*方案|.*建议书)$', title_text)
+            if suffix_match:
+                return f"{project_name}{suffix_match.group(1)}"
+            if title_text in ('可行性分析报告', '项目可行性分析报告', '变更方案'):
+                return f"{project_name}{title_text}"
+        return title_text
+
+    return project_name
+
+
+def _update_document_title(doc, title_text):
+    """Update the document's core title property and the first visible title paragraph."""
+    if not title_text:
+        return
+
+    props = doc.core_properties
+    props.title = title_text
+
+    title_para = _find_first_title_paragraph(doc)
+    if title_para is not None:
+        title_para.text = title_text
 
 
 def _update_headers_with_images(doc, new_text):
@@ -454,17 +548,13 @@ def main():
         if args.header_text:
             updates["header_text"] = args.header_text
         elif args.project_name:
-            # Auto-generate header from project name
-            # Pattern: extract the suffix after '某某' in template header
-            # e.g. template="某某功能项目-可行性分析报告"
-            #       + project="投资O32新增理财及信托产品投资功能"
-            #       → header="投资O32新增理财及信托产品投资功能项目-可行性分析报告"
+            # Auto-generate header and title from project name
             template_header = _read_template_header(args.document)
             if template_header:
                 pname = args.project_name
                 header_text = template_header
                 某某_count = header_text.count('某某')
-                
+
                 if 某某_count == 1:
                     if pname.endswith('功能'):
                         pname = pname[:-1]
@@ -472,19 +562,20 @@ def main():
                 elif 某某_count >= 2:
                     idx1 = header_text.find('某某')
                     idx2 = header_text.find('某某', idx1 + 2)
-                    
+
                     if idx2 >= 0:
                         sys_name = _extract_system_name(pname)
                         pname_short = pname[len(sys_name):] if pname.startswith(sys_name) else pname
                         if pname_short.endswith('功能'):
                             pname_short = pname_short[:-1]
-                        
+
                         header_text = header_text[:idx1] + pname_short + header_text[idx1 + 2:]
                         header_text = header_text[:idx2] + sys_name + header_text[idx2 + 2:]
-                
+
                 updates["header_text"] = header_text
             else:
                 updates["header_text"] = f"{args.project_name}项目-可行性分析报告"
+            updates["project_name"] = args.project_name
         if args.footer_text: updates["footer_text"] = args.footer_text
         if args.comments: updates["comments"] = args.comments
         print(json.dumps(update_meta(args.document, args.output, updates), ensure_ascii=False))

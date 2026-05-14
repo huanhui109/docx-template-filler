@@ -40,6 +40,8 @@ openclaw restart
 - 提供固定模板文件 / Built-in fixed templates
 - 支持用户自定义模板 / Support user-defined templates
 - 文档完整性检查 / Document completeness checking
+- 通用填充引擎支持文本、表格、步骤表格 / Generic fill engine supports text, table, steps_table
+- 章节标题模糊匹配（容忍标点差异）/ Fuzzy heading matching (tolerates punctuation differences)
 
 ---
 
@@ -326,5 +328,7 @@ docx-template-filler/
 ---
 
 ## 版本 / Version
+
+v2.1.0 - 增强通用填充引擎：支持表格与步骤表格填充，章节模糊匹配，修复重复定义与页眉页脚复制
 
 v1.0.0 - 初始版本 / Initial Release

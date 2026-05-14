@@ -138,31 +138,118 @@ template_path = user_provided_template_path
 ### Step 3: Parse and Fill
 
 ```bash
-# 1. Parse template
-python3 scripts/docx_parse.py <template.docx> --output /tmp/struct.json
+# 1. Parse template (with optional smart title generation)
+python3 scripts/docx_parse.py <template.docx> --project-name "项目名称" --output /tmp/struct.json
 
 # 2. Generate content from source documents (agent creates content.json)
 
-# 3. Fill content
-python3 scripts/docx_fill.py <template.docx> content.json <output.docx>
+# 3. Fill content with interactive metadata confirmation
+python3 scripts/docx_fill.py <template.docx> content.json <output.docx> \
+  --author "作者" --department "部门" --revision-date "YYYY-MM-DD" \
+  --project-name "项目名称"
 
 # 4. Clean punctuation + check
-python3 scripts/docx_check.py <output.docx> /tmp/struct.json --clean <output.docx>
+---
 
-# 5. First-line indent (2 chars)
-python3 scripts/docx_meta.py indent <output.docx> <output.docx> --chars 2
+## New Features (v2.1)
 
-# 6. Mark TOC dirty
-python3 scripts/docx_meta.py toc <output.docx> <output.docx>
+### Generic Table Support
 
-# 7. Update metadata + header
-python3 scripts/docx_meta.py update <output.docx> <output.docx> \
-  --project-name "项目名称" --author "作者" --department "部门" \
-  --revision-date "YYYY-MM-DD"
+The fill engine now supports `table` and `steps_table` in all document types:
 
-# 8. Version save
-python3 scripts/docx_meta.py save <output.docx> <workspace> --name "文件名"
+```json
+{
+  "sections": {
+    "配置更新": {
+      "table": {
+        "headers": ["项目", "说明"],
+        "rows": [["配置项1", "说明1"]]
+      }
+    },
+    "变更步骤": {
+      "steps_table": {
+        "headers": ["步骤", "操作内容", "预期结果", "截图"],
+        "steps": [
+          {"step": "1", "op": "登录系统", "expected": "成功", "screenshot": ""}
+        ]
+      }
+    }
+  }
+}
 ```
+
+### Fuzzy Heading Matching
+
+Section matching now tolerates minor punctuation differences:
+- "变更步骤" matches "变更步骤。"
+- "变更目的" matches "变更目的："
+- Fallback to containment matching if exact match fails
+
+## Features (v2.0)
+
+### Interactive Metadata Confirmation
+
+When filling templates, the tool now prompts for document metadata before processing:
+
+```bash
+python3 scripts/docx_fill.py template.docx content.json output.docx --project-name "投资O32新增理财功能"
+```
+
+**Interactive prompts:**
+- 文档作者 [default from args or empty]
+- 部门/单位 [default from args or empty]  
+- 文档日期（YYYY-MM-DD） [default from args or empty]
+- 项目名称（用于首页标题智能修改） [default from args or empty]
+- 文档标题（可选，留空则自动生成） [default from args or empty]
+
+**Confirmation:**
+```
+确认以下元信息：
+  作者: 张三
+  部门: 信息技术中心
+  日期: 2026-05-12
+  项目名称: 投资O32新增理财功能
+  文档标题: (自动生成)
+是否继续填充文档内容？ (Y/n):
+```
+
+### Smart Title Generation
+
+The tool automatically generates appropriate document titles based on project names:
+
+**Examples:**
+- Template: "某某功能项目-可行性分析报告" + Project: "投资O32新增理财及信托产品投资功能"
+- Generated: "投资O32新增理财及信托产品投资功能项目-可行性分析报告"
+
+**Logic:**
+1. Replace "某某" placeholders in template title/header
+2. Extract system name (e.g., "投资O32" from "投资O32新增理财功能")
+3. Generate full title with project name + template suffix
+
+### Enhanced Parsing with Title Suggestions
+
+Parse templates with project name to get suggested titles:
+
+```bash
+python3 scripts/docx_parse.py template.docx --project-name "项目名称" --output struct.json
+```
+
+**Output includes:**
+```json
+{
+  "title": "original template title",
+  "suggested_title": "智能生成的标题",
+  "sections": [...],
+  "metadata": {...}
+}
+```
+
+### Metadata Auto-Update
+
+After filling, metadata is automatically written to the output document:
+- Core properties: title, author, subject (department), modified date
+- Visible title paragraph updated
+- Header/footer preserved
 
 ---
 

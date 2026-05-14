@@ -32,8 +32,10 @@ try:
     from docx import Document
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx_meta import update_meta
+    from docx_utils import heading_match_score, make_table, make_empty_para, steps_table_to_rows
 except ImportError:
-    print("ERROR: python-docx not installed. Run: pip3 install python-docx", file=sys.stderr)
+    print("ERROR: python-docx not installed or docx_meta module not found. Run: pip3 install python-docx and ensure module is available.", file=sys.stderr)
     sys.exit(1)
 
 
@@ -55,6 +57,29 @@ def is_placeholder(text):
     if not stripped or len(stripped) < 2 or len(stripped) > 50:
         return False
     return any(p.match(stripped) for p in PLACEHOLDER_PATTERNS)
+
+
+def prompt_string(prompt, default=""):
+    if default:
+        prompt_text = f"{prompt} [{default}]: "
+    else:
+        prompt_text = f"{prompt}: "
+    try:
+        value = input(prompt_text).strip()
+        return value if value else default
+    except EOFError:
+        return default
+
+
+def prompt_yes_no(prompt, default=True):
+    default_hint = "Y/n" if default else "y/N"
+    try:
+        answer = input(f"{prompt} ({default_hint}): ").strip().lower()
+    except EOFError:
+        return default
+    if not answer:
+        return default
+    return answer in ("y", "yes", "是", "yep")
 
 
 def extract_template_fonts(doc):
@@ -206,24 +231,36 @@ def apply_template_font_to_run(run, template_fonts):
         run._r.insert(0, deepcopy(normal_rpr))
 
 
-def find_section_range(doc, heading_text):
+def find_section_range(doc, heading_text, fuzzy_threshold=0.8):
     """Find the paragraph index of a heading and the range of content after it.
+
+    Supports fuzzy matching for headings that differ slightly in punctuation.
 
     Returns: (heading_idx, first_content_idx, end_idx)
     Where content paragraphs are [first_content_idx, end_idx)
     """
     paragraphs = list(doc.paragraphs)
+    candidates = []
     for i, para in enumerate(paragraphs):
         text = para.text.strip()
         style_name = (para.style.name or '').lower()
-        if text == heading_text and ('heading' in style_name or 'title' in style_name):
-            j = i + 1
-            while j < len(paragraphs):
-                s = (paragraphs[j].style.name or '').lower()
-                if 'heading' in s or 'title' in s:
-                    break
-                j += 1
-            return i, i + 1, j
+        is_heading_style = 'heading' in style_name or 'title' in style_name
+        score = heading_match_score(text, heading_text)
+        if score >= fuzzy_threshold and is_heading_style:
+            candidates.append((score, i))
+
+    # Sort by score descending, pick best match
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        i = candidates[0][1]
+        j = i + 1
+        while j < len(paragraphs):
+            s = (paragraphs[j].style.name or '').lower()
+            if 'heading' in s or 'title' in s:
+                break
+            j += 1
+        return i, i + 1, j
+
     return None, None, None
 
 
@@ -245,6 +282,7 @@ def fill_section(doc, heading_text, section_data, template_fonts):
     if mode == "clear":
         for idx in content_indices:
             clear_paragraph_content(paragraphs[idx])
+        _insert_section_tables(doc, heading_para, section_data)
         return True
 
     if mode == "append":
@@ -254,6 +292,7 @@ def fill_section(doc, heading_text, section_data, template_fonts):
                                          template_fonts=template_fonts)
             insert_after_p._p.addnext(new_p)
             insert_after_p = type('P', (), {'_p': new_p})()
+        _insert_section_tables(doc, heading_para, section_data)
         return True
 
     # "replace" mode
@@ -307,9 +346,55 @@ def fill_section(doc, heading_text, section_data, template_fonts):
             insert_after_p = type('P', (), {'_p': new_p})()
             filled_count += 1
 
+    # Handle table / steps_table insertion after text content
+    _insert_section_tables(doc, heading_para, section_data)
+
     print(f"  Section '{heading_text}': filled {filled_count} paragraphs, "
           f"skipped {len(existing)} existing", file=sys.stderr)
     return True
+
+
+def _insert_section_tables(doc, heading_para, section_data):
+    """Insert table or steps_table into a section after text content."""
+    insert_after = heading_para._element
+
+    # Find the last content element under this heading to insert after
+    heading_idx = None
+    for i, p in enumerate(doc.paragraphs):
+        if p._element is heading_para._element:
+            heading_idx = i
+            break
+
+    if heading_idx is not None:
+        # Walk forward to find last non-heading paragraph before next heading
+        paragraphs = list(doc.paragraphs)
+        last_elem = heading_para._element
+        for j in range(heading_idx + 1, len(paragraphs)):
+            s = (paragraphs[j].style.name or '').lower()
+            if 'heading' in s or 'title' in s:
+                break
+            # Skip empty paragraphs but track position
+            last_elem = paragraphs[j]._element
+        insert_after = last_elem
+
+    if 'steps_table' in section_data:
+        sd = section_data['steps_table']
+        headers, rows = steps_table_to_rows(sd)
+        if rows:
+            tbl = make_table(headers, rows)
+            insert_after.addnext(tbl)
+            insert_after = tbl
+            insert_after.addnext(make_empty_para())
+
+    elif 'table' in section_data:
+        td = section_data['table']
+        headers = td.get('headers', [])
+        rows = td.get('rows', [])
+        if headers and rows:
+            tbl = make_table(headers, rows)
+            insert_after.addnext(tbl)
+            insert_after = tbl
+            insert_after.addnext(make_empty_para())
 
 
 def fill_template(template_path, content_data, output_path):
@@ -345,6 +430,12 @@ def main():
     parser.add_argument("template", help="Path to the .docx template file")
     parser.add_argument("content", help="Path to the content JSON file")
     parser.add_argument("output", help="Path for the output .docx file")
+    parser.add_argument("--author", help="Document author")
+    parser.add_argument("--department", help="Document department or organization")
+    parser.add_argument("--revision-date", help="Document date, e.g. 2026-05-12")
+    parser.add_argument("--project-name", help="Project name used for homepage title smart rewrite")
+    parser.add_argument("--title", help="Visible document title, overrides generated title")
+    parser.add_argument("--no-interactive", action="store_true", help="Disable interactive metadata confirmation prompts")
 
     args = parser.parse_args()
     template_path = Path(args.template)
@@ -357,9 +448,49 @@ def main():
         print(f"ERROR: Content file not found: {content_path}", file=sys.stderr)
         sys.exit(1)
 
+    author = args.author or ""
+    department = args.department or ""
+    revision_date = args.revision_date or ""
+    project_name = args.project_name or ""
+    title = args.title or ""
+
+    if sys.stdin.isatty() and not args.no_interactive:
+        print("请先确认文档元信息，然后开始填充。")
+        author = prompt_string("文档作者", author)
+        department = prompt_string("部门/单位", department)
+        revision_date = prompt_string("文档日期（YYYY-MM-DD）", revision_date)
+        project_name = prompt_string("项目名称（用于首页标题智能修改）", project_name)
+        title = prompt_string("文档标题（可选，留空则自动生成）", title)
+        print("\n确认以下元信息：")
+        print(f"  作者: {author}")
+        print(f"  部门: {department}")
+        print(f"  日期: {revision_date}")
+        print(f"  项目名称: {project_name}")
+        print(f"  文档标题: {title or '(自动生成)'}")
+        if not prompt_yes_no("是否继续填充文档内容？", default=True):
+            print("已取消。", file=sys.stderr)
+            sys.exit(0)
+
     content_data = json.loads(content_path.read_text(encoding='utf-8'))
     result = fill_template(template_path, content_data, args.output)
-    print(json.dumps(result, ensure_ascii=False))
+
+    metadata_updates = {}
+    if author:
+        metadata_updates["author"] = author
+    if department:
+        metadata_updates["subject"] = department
+    if revision_date:
+        metadata_updates["revision_date"] = revision_date
+    if project_name:
+        metadata_updates["project_name"] = project_name
+    if title:
+        metadata_updates["title"] = title
+
+    if metadata_updates:
+        update_meta(args.output, args.output, metadata_updates)
+        print(json.dumps({**result, "metadata_updates": metadata_updates}, ensure_ascii=False))
+    else:
+        print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":

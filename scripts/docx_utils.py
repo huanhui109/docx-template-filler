@@ -316,38 +316,37 @@ def extract_header_footer_info(doc: Document) -> Dict:
 
 
 def copy_header_footer(src_doc: Document, dst_doc: Document) -> None:
-    """Copy header and footer from source to destination document.
-    
+    """Copy header and footer from source to destination document via XML deep-copy.
+
+    Preserves all formatting, images, tabs, and field codes in headers/footers.
+
     Args:
         src_doc: Source document with headers/footers
         dst_doc: Destination document to copy to
     """
     if not src_doc.sections:
         return
-    
+
+    src_section = src_doc.sections[0]
+
     for dst_section in dst_doc.sections:
-        src_section = src_doc.sections[0]
-        
-        # Copy header
-        if src_section.header:
-            if not dst_section.header:
-                pass
+        # Copy header — deep copy XML paragraphs
+        if src_section.header and not src_section.header.is_linked_to_previous:
+            hdr_elem = dst_section.header._element
+            # Remove existing paragraphs
+            for child in list(hdr_elem):
+                hdr_elem.remove(child)
             for para in src_section.header.paragraphs:
-                new_para = dst_section.header.add_paragraph()
-                _copy_paragraph_format(para, new_para)
-                if para.text:
-                    new_para.add_run(para.text)
-        
-        # Copy footer
-        if src_section.footer:
-            if not dst_section.footer:
-                pass
+                hdr_elem.append(deepcopy(para._element))
+
+        # Copy footer — deep copy XML paragraphs
+        if src_section.footer and not src_section.footer.is_linked_to_previous:
+            ftr_elem = dst_section.footer._element
+            for child in list(ftr_elem):
+                ftr_elem.remove(child)
             for para in src_section.footer.paragraphs:
-                new_para = dst_section.footer.add_paragraph()
-                _copy_paragraph_format(para, new_para)
-                if para.text:
-                    new_para.add_run(para.text)
-        
+                ftr_elem.append(deepcopy(para._element))
+
         # Copy section properties
         dst_section.different_first_page_header_footer = src_section.different_first_page_header_footer
 
@@ -1047,5 +1046,157 @@ def analyze_user_template(template_path: str) -> dict:
                 
     except Exception as e:
         result["error"] = str(e)
-    
+
     return result
+
+
+def normalize_heading(text: str) -> str:
+    """Normalize heading text for fuzzy matching.
+
+    Strips whitespace, removes trailing punctuation (。.:：), and
+    standardizes Chinese/English punctuation.
+    """
+    if not text:
+        return ""
+    text = text.strip()
+    # Remove trailing punctuation commonly found in headings
+    text = re.sub(r'[。\.\:：]+$', '', text)
+    return text
+
+
+def heading_match_score(heading_a: str, heading_b: str) -> float:
+    """Compute a match score between two heading texts (0.0 - 1.0).
+
+    Scoring:
+        1.0  Exact match after normalization
+        0.9  One contains the other after normalization
+        0.8  One contains the other raw
+        0.0  No match
+    """
+    if not heading_a or not heading_b:
+        return 0.0
+    a = normalize_heading(heading_a)
+    b = normalize_heading(heading_b)
+    if a == b:
+        return 1.0
+    if a in b or b in a:
+        return 0.9
+    # Fallback: raw containment (tolerates punctuation differences)
+    raw_a = heading_a.strip()
+    raw_b = heading_b.strip()
+    if raw_a in raw_b or raw_b in raw_a:
+        return 0.8
+    return 0.0
+
+
+def make_empty_para() -> OxmlElement:
+    """Create an empty paragraph XML element with Normal style."""
+    p = OxmlElement('w:p')
+    pPr = OxmlElement('w:pPr')
+    pStyle = OxmlElement('w:pStyle')
+    pStyle.set(qn('w:val'), 'Normal')
+    pPr.append(pStyle)
+    p.append(pPr)
+    return p
+
+
+def make_cell(text: str, bold: bool = False, shading: Optional[str] = None) -> OxmlElement:
+    """Create a table cell XML element."""
+    tc = OxmlElement('w:tc')
+    tcPr = OxmlElement('w:tcPr')
+    if shading:
+        shd = OxmlElement('w:shd')
+        shd.set(qn('w:fill'), shading)
+        shd.set(qn('w:val'), 'clear')
+        tcPr.append(shd)
+    tc.append(tcPr)
+    p = OxmlElement('w:p')
+    pPr = OxmlElement('w:pPr')
+    jc = OxmlElement('w:jc')
+    jc.set(qn('w:val'), 'center')
+    pPr.append(jc)
+    p.append(pPr)
+    r = OxmlElement('w:r')
+    if bold:
+        rPr = OxmlElement('w:rPr')
+        rPr.append(OxmlElement('w:b'))
+        r.append(rPr)
+    t = OxmlElement('w:t')
+    t.set(qn('xml:space'), 'preserve')
+    t.text = text
+    r.append(t)
+    p.append(r)
+    tc.append(p)
+    return tc
+
+
+def make_table(headers: List[str], rows: List[List[str]]) -> OxmlElement:
+    """Create a table XML element with header shading.
+
+    Args:
+        headers: List of header cell texts
+        rows: List of row cell texts
+
+    Returns:
+        OxmlElement representing the table
+    """
+    tbl = OxmlElement('w:tbl')
+    tblPr = OxmlElement('w:tblPr')
+    tblW = OxmlElement('w:tblW')
+    tblW.set(qn('w:w'), '0')
+    tblW.set(qn('w:type'), 'auto')
+    tblPr.append(tblW)
+    borders = OxmlElement('w:tblBorders')
+    for name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+        b = OxmlElement(f'w:{name}')
+        b.set(qn('w:val'), 'single')
+        b.set(qn('w:sz'), '4')
+        b.set(qn('w:space'), '0')
+        b.set(qn('w:color'), 'auto')
+        borders.append(b)
+    tblPr.append(borders)
+    tbl.append(tblPr)
+
+    grid = OxmlElement('w:tblGrid')
+    for _ in headers:
+        col = OxmlElement('w:gridCol')
+        col.set(qn('w:w'), str(9000 // len(headers)))
+        grid.append(col)
+    tbl.append(grid)
+
+    # Header row
+    tr = OxmlElement('w:tr')
+    for h in headers:
+        tr.append(make_cell(h, bold=True, shading='D9E2F3'))
+    tbl.append(tr)
+
+    # Data rows
+    for row in rows:
+        tr = OxmlElement('w:tr')
+        for val in row:
+            tr.append(make_cell(str(val)))
+        tbl.append(tr)
+    return tbl
+
+
+def steps_table_to_rows(steps_table: Dict) -> Tuple[List[str], List[List[str]]]:
+    """Convert a steps_table structure into headers and rows.
+
+    Args:
+        steps_table: {"headers": [...], "steps": [...]}
+
+    Returns:
+        (headers, rows)
+    """
+    headers = steps_table.get('headers', ['步骤', '操作内容', '预期结果', '截图'])
+    rows = []
+    for s in steps_table.get('steps', []):
+        ops = s.get('ops', [s.get('op', '')])
+        for k, op in enumerate(ops):
+            row = [s.get('step', '') if k == 0 else '', op]
+            if len(headers) > 2:
+                row.append(s.get('expected', '') if k == 0 else '')
+            if len(headers) > 3:
+                row.append(s.get('screenshot', '') if k == 0 else '')
+            rows.append(row[:len(headers)])
+    return headers, rows
